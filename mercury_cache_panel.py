@@ -328,8 +328,23 @@ def build_panel_data():
     health = health_breakdown(by_vendor, codex_quota)
     baseline = usage_baseline(by_day)
 
+    # Date range for "since X" hero line
+    all_ts = [m["ts_unix"] for s in sessions for m in s["messages"] if m["ts_unix"]]
+    first_day = datetime.fromtimestamp(min(all_ts)).strftime("%Y-%m-%d") if all_ts else "—"
+    last_day = datetime.fromtimestamp(max(all_ts)).strftime("%Y-%m-%d") if all_ts else "—"
+
+    # If user cleared NOW on the most-active session, estimate savings over next hour
+    clear_now_savings = 0
+    for s in active_detail:
+        # If session has waste already, that's locked in. Future savings come from avoiding more.
+        if s.get("recent_60min_cost", 0) > 1:
+            # Rough: clearing means next hour starts fresh, no stale 1h cache_write pile-up
+            # Estimate: 30% of recent_60min_cost was avoidable cache_write rebuild
+            clear_now_savings += s["recent_60min_cost"] * 0.3
+
     return {
         "generated_at": datetime.now().isoformat(),
+        "first_day": first_day, "last_day": last_day,
         "n_sessions": len(sessions),
         "n_active": sum(1 for s in sessions if s["is_active"]),
         "by_vendor": dict(by_vendor),
@@ -337,6 +352,7 @@ def build_panel_data():
         "by_day": dict(by_day),
         "by_tool": dict(by_tool),
         "by_skill": dict(by_skill),
+        "clear_now_savings": clear_now_savings,
         "by_hour": dict(by_hour),
         "codex_quota": codex_quota,
         "active_detail": active_detail,
@@ -445,11 +461,33 @@ def render_html(data):
           </div>
         </div>'''
 
-    # Project table
+    # Project table — clean cross-machine labels
+    def clean_proj(k, vendor):
+        proj = k.split("::", 1)[1] if "::" in k else k
+        # Strip user-path noise: "[gx10] home/alice/gx10/cli/printing/press"
+        # becomes "[gx10] cli/printing/press" by dropping first 2-3 path segments
+        if proj.startswith("["):
+            host_end = proj.find("]") + 1
+            host_prefix = proj[:host_end]
+            tail = proj[host_end:].strip()
+            # Drop /Users/<user>/ or /home/<user>/ or first user dir segment
+            parts = [p for p in tail.split("/") if p]
+            if len(parts) >= 2 and parts[0] in ("Users", "home"):
+                parts = parts[2:]  # drop "Users/john" or "home/alice"
+            elif len(parts) >= 1 and parts[0] in ("opt", "var", "tmp"):
+                parts = parts[1:]
+            tail = "/".join(parts) or "(root)"
+            return f"{host_prefix} {tail}"
+        # Local: strip leading /Users/norikaoda/ etc
+        parts = [p for p in proj.split("/") if p]
+        if len(parts) >= 2 and parts[0] in ("Users", "home"):
+            parts = parts[2:]
+        return "/".join(parts) or "(root)"
+
     proj_rows = ""
     for k, v in sorted(data["by_project"].items(), key=lambda x: -x[1]["cost"]["saved_usd"])[:20]:
-        proj = k.split("::", 1)[1] if "::" in k else k
-        proj_rows += f'<tr><td><span class="vendor-tag {v["vendor"]}">{v["vendor"]}</span> {proj[:55]}</td><td class="r">{v["n"]}</td><td class="r">{v["active"]}</td><td class="r">${v["cost"]["actual_usd"]:.2f}</td><td class="r green">${v["cost"]["saved_usd"]:.0f}</td><td class="r red">${v["waste_usd"]:.2f}</td></tr>'
+        proj_short = clean_proj(k, v["vendor"])
+        proj_rows += f'<tr><td><span class="vendor-tag {v["vendor"]}">{v["vendor"]}</span> {proj_short[:60]}</td><td class="r">{v["n"]}</td><td class="r">{v["active"]}</td><td class="r">${v["cost"]["actual_usd"]:.2f}</td><td class="r green">${v["cost"]["saved_usd"]:.0f}</td><td class="r red">${v["waste_usd"]:.2f}</td></tr>'
 
     # Tool table
     tool_rows = ""
@@ -460,6 +498,28 @@ def render_html(data):
     total_saved = sum(v["cost"]["saved_usd"] for v in data["by_vendor"].values())
     total_actual = sum(v["cost"]["actual_usd"] for v in data["by_vendor"].values())
     total_wasted = sum(v["waste_usd"] for v in data["by_vendor"].values())
+    total_naive = sum(v["cost"].get("naive_usd", 0) for v in data["by_vendor"].values())
+    clear_savings = data.get("clear_now_savings", 0)
+    total_wasted_tok = 0
+    for v in data["by_vendor"].values():
+        # waste already in $, also estimate raw token count
+        pass
+
+    # Compute wasted tokens (cache writes that didn't get re-read within TTL)
+    total_wasted_tok = 0
+    for v in data["by_vendor"].values():
+        # Approximate: waste_usd / cache_write_1h_price * 1e6
+        cw_price = PRICING.get("claude", {}).get("cache_write_1h", 6.00)
+        total_wasted_tok += int(v["waste_usd"] / cw_price * 1e6) if cw_price else 0
+
+    # Top wasteful projects (red flag table)
+    bad_projects = sorted(
+        [(k, v) for k, v in data["by_project"].items() if v["waste_usd"] > 0.10],
+        key=lambda x: -x[1]["waste_usd"])[:10]
+    bad_proj_html = ""
+    for k, v in bad_projects:
+        proj_short = clean_proj(k, v["vendor"])
+        bad_proj_html += f'<tr><td>{proj_short[:60]}</td><td class="r">{v["n"]}</td><td class="r">${v["cost"]["actual_usd"]:.2f}</td><td class="r red">${v["waste_usd"]:.2f}</td></tr>'
     health = data["health"]["score"]
     health_factors = data["health"]["factors"]
     health_color = "#66cc88" if health > 80 else "#ff8844" if health > 60 else "#cc5566"
@@ -525,14 +585,45 @@ def render_html(data):
     for sk, c in sorted(data["by_skill"].items(), key=lambda x: -x[1])[:15]:
         skill_rows += f'<tr><td><code>{sk}</code></td><td class="r">{c:,}</td></tr>'
 
+    api_multiplier = total_naive / max(total_actual, 0.01)
+    # Precompute conditional HTML chunks (f-string can't nest)
+    cta_html = ""
+    if clear_savings > 0.50:
+        cta_html = f'<div class="cta"><div><div class="cta-text">⚡ One /clear right now could save approximately ${clear_savings:.2f} over the next hour</div><div class="cta-sub">Based on your recent 60-minute burn rate · {data["n_active"]} active session(s) carrying stale cache</div></div><div class="cta-btn">Run /clear in your terminal</div></div>'
+
+    redflag_html = ""
+    if bad_proj_html:
+        redflag_html = f'<div class="card" style="border-left: 3px solid #cc5566"><div class="card-title">🚨 Top money-burning projects (red flag)</div><table><tr><th>Project</th><th class="r">Sessions</th><th class="r">Cost $</th><th class="r">Wasted $</th></tr>{bad_proj_html}</table></div>'
+
     return f'''<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Mercury Cache Panel</title>
+<title>Mercury Cache Panel — your AI token reality check</title>
 <meta http-equiv="refresh" content="60">
 <style>
   * {{ box-sizing: border-box; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; background: #0a0d12; color: #d4d8de; padding: 24px; margin: 0; }}
-  h1 {{ color: #fff; font-size: 22px; margin: 0 0 4px; font-weight: 700; }}
+  h1 {{ color: #fff; font-size: 24px; margin: 0 0 4px; font-weight: 800; }}
   .meta {{ color: #6b7480; font-size: 12px; margin-bottom: 24px; }}
+  /* HUMAN-IMPACT HERO */
+  .impact {{ background: linear-gradient(135deg, #2a1416 0%, #1a1014 100%); border-radius: 14px; padding: 28px 32px; margin-bottom: 24px; border: 1px solid #4a2228; }}
+  .impact-line1 {{ font-size: 13px; color: #cc8888; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; margin-bottom: 8px; }}
+  .impact-num {{ font-size: 64px; font-weight: 900; color: #ff4458; line-height: 1; letter-spacing: -1px; }}
+  .impact-tag {{ font-size: 13px; color: #cc8888; margin-top: 10px; line-height: 1.5; }}
+  .impact-row2 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 22px; }}
+  .impact-card {{ background: #1a1015; padding: 16px; border-radius: 8px; border-left: 3px solid #ff4458; }}
+  .impact-card.win {{ border-left-color: #66cc88; }}
+  .impact-card .ic-lbl {{ font-size: 11px; color: #8a8a8a; text-transform: uppercase; letter-spacing: 1px; }}
+  .impact-card .ic-num {{ font-size: 28px; font-weight: 800; color: #fff; margin-top: 4px; }}
+  .impact-card .ic-tag {{ font-size: 11px; color: #888; margin-top: 4px; line-height: 1.4; }}
+  /* CTA banner */
+  .cta {{ background: #ff8844; color: #000; padding: 18px 24px; border-radius: 10px; margin-bottom: 22px; display: flex; justify-content: space-between; align-items: center; }}
+  .cta-text {{ font-size: 15px; font-weight: 700; }}
+  .cta-sub {{ font-size: 12px; opacity: 0.85; margin-top: 2px; }}
+  .cta-btn {{ background: #000; color: #ff8844; padding: 10px 22px; border-radius: 6px; font-weight: 700; font-size: 14px; }}
+  /* Guidance card */
+  .guide {{ background: #14201a; padding: 18px 22px; border-radius: 10px; margin-bottom: 22px; border-left: 3px solid #66cc88; }}
+  .guide-title {{ color: #66cc88; font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 12px; }}
+  .guide ul {{ margin: 0; padding-left: 22px; color: #c4c8ce; font-size: 13px; line-height: 1.7; }}
+  .guide li b {{ color: #66cc88; }}
 
   /* Top hero strip */
   .hero {{ display: grid; grid-template-columns: 200px 1fr; gap: 18px; margin-bottom: 22px; }}
@@ -642,24 +733,49 @@ def render_html(data):
   .b-lbl {{ font-size: 9px; color: #6b7480; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 4px; display: block; }}
 </style></head><body>
 
-<h1>Mercury Cache Panel</h1>
-<div class="meta">Updated {data["generated_at"][:19]} · {data["n_sessions"]} sessions · {len(data["by_vendor"])} vendors · auto-refresh 60s · source: <code>~/.claude/projects/</code> + <code>~/.codex/</code></div>
+<h1>💸 Where your AI tokens actually went</h1>
+<div class="meta">Since {data["first_day"]} · {data["n_sessions"]} sessions · {data["n_active"]} active right now · auto-refresh 60s</div>
 
-<div class="hero">
-  <div class="health">
-    <div class="health-num">{health}</div>
-    <div class="health-lbl">Cache Health Score</div>
-  </div>
-  <div class="totals">
-    <div class="total-stat saved"><span class="n">${total_saved:,.0f}</span><span class="l">Total saved via cache</span></div>
-    <div class="total-stat cost"><span class="n">${total_actual:,.2f}</span><span class="l">Actual cost</span></div>
-    <div class="total-stat waste"><span class="n">${total_wasted:.2f}</span><span class="l">Wasted on expired cache</span></div>
-    <div class="total-stat active"><span class="n">{data["n_active"]}</span><span class="l">Active sessions</span></div>
+<div class="impact">
+  <div class="impact-line1">tokens you already burned for nothing</div>
+  <div class="impact-num">${total_wasted:.2f}</div>
+  <div class="impact-tag">{total_wasted_tok:,} cache-write tokens written to disk and never read back before they expired. Pure dead spend. Money you handed the vendor for zero value.</div>
+  <div class="impact-row2">
+    <div class="impact-card">
+      <div class="ic-lbl">Actual cost so far</div>
+      <div class="ic-num">${total_actual:,.2f}</div>
+      <div class="ic-tag">What you've paid since {data["first_day"]}</div>
+    </div>
+    <div class="impact-card">
+      <div class="ic-lbl">If you'd used the API directly</div>
+      <div class="ic-num">${total_naive:,.2f}</div>
+      <div class="ic-tag">No cache discount. This is what API users (you, back in April) actually pay. {api_multiplier:.1f}× the subscription price.</div>
+    </div>
+    <div class="impact-card win">
+      <div class="ic-lbl">Saved by using subscription + cache</div>
+      <div class="ic-num">${total_saved:,.0f}</div>
+      <div class="ic-tag">Vs. naive API pricing on the same workload. Cache discipline = real money.</div>
+    </div>
   </div>
 </div>
 
+{cta_html}
+
+<div class="guide">
+  <div class="guide-title">💡 How to stop bleeding money (this week)</div>
+  <ul>
+    <li><b>Don't /clear mid-task.</b> Every /clear or /compact throws away the cache you already paid to write. Wait until you're actually done with that thread.</li>
+    <li><b>Don't switch models mid-conversation.</b> Flipping Opus↔Sonnet (including "opus plan" mode) invalidates the cache. Pick one and stick.</li>
+    <li><b>Don't edit CLAUDE.md mid-session.</b> CLAUDE.md is part of the cached prefix. Edit it between sessions only.</li>
+    <li><b>If a session has been idle &gt;1 hour, /clear before resuming.</b> The 1-hour TTL has expired anyway. Restart fresh and the first message rebuilds cache once, not the bloated old context.</li>
+    <li><b>Run sub-agents sparingly.</b> Each sub-agent gets a fresh 5-minute TTL cache, not the parent's 1-hour. Bulk sub-agent loops can burn cache_write costs faster than they save.</li>
+  </ul>
+</div>
+
+{redflag_html}
+
 <details class="health-detail">
-  <summary>Why is the health score {health}? · click to expand</summary>
+  <summary>Cache health score: {health} / 100 · click to see what's costing you points</summary>
   <ul>{health_factor_html}</ul>
 </details>
 
