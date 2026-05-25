@@ -414,7 +414,168 @@ def build_panel_data():
     }
 
 # === HTML ===
-def render_html(data):
+def _translate_to_zh(html):
+    """Post-process the English HTML and swap to Traditional Chinese."""
+    swaps = [
+        # Hero
+        ('💸 Where your AI tokens actually went', '💸 你的 AI token 到底花到哪去了'),
+        ('all amounts in USD', '所有金額為美元'),
+        ('sessions ·', '個對話 ·'),
+        ('active right now', '個正在進行'),
+        ('auto-refresh 60s', '每 60 秒自動更新'),
+        ('Since', '從'),
+        # Double-billing alert
+        ('🚨 If you pay for Claude Pro / Max — check this first',
+         '🚨 有付 Claude Pro / Max 訂閱的人 — 請先看這個'),
+        ("Anthropic's desktop app (Claude Cowork / Claude Code) can silently create an API key labeled",
+         "Anthropic 桌面 app (Claude Cowork / Claude Code) 會悄悄在你帳戶下建一把名為"),
+        ("on your account and bill you <b>pay-as-you-go on top of your subscription</b>",
+         "的 API key，並在你訂閱費用之外<b>另外按用量收費</b>"),
+        ("I personally paid Max $200/mo and was charged an extra USD $89.90 across 18 days for usage I assumed my subscription covered.",
+         "我本人付了 Max $200/月，結果 18 天內被多扣 USD $89.90，原以為訂閱已含。"),
+        ("Support ignores email refund requests. Credit-card chargeback gets dismissed as", "客服 email 退費請求無視。信用卡 chargeback 被駁回為"),
+        ('"legitimate use." Public outrage doesn\'t move the needle.', '「正常使用」。公開抱怨沒效果。'),
+        ("The only thing that stops this is <b>you cutting off the bleed yourself</b>.",
+         "唯一能停的方法是<b>你自己關掉這條漏</b>。"),
+        ("Open <a", "另開分頁打開 <a"),
+        ("in another tab.", "。"),
+        ("If you see a key named <b>coworking</b> (or any key you don't remember manually creating), click <b>Revoke</b>. Your subscription stays active. Your past sessions still work.",
+         "若看到名為 <b>coworking</b> 的 key（或任何不是你手動建的 key）→ 按 <b>Revoke</b>。訂閱不會掉，過去 session 仍能用。"),
+        ("→ set <b>monthly spend limit to $0</b>. This makes future API charges literally impossible while leaving subscription untouched.",
+         "→ 把<b>每月 spend limit 設成 $0</b>。這樣未來 API 完全收不到錢，訂閱不受影響。"),
+        ("Turn OFF auto-recharge in", "在"),
+        ("billing settings</a>. Without this, a refunded $89.90 is just back next month.",
+         "billing 設定</a>關掉 auto-recharge。沒關的話，refund 回來下個月又會被扣走。"),
+        # Cache 101
+        ('📚 Cache 101 — why your subscription bill looks the way it does',
+         '📚 Cache 101 — 為什麼你的訂閱帳單長這樣'),
+        ('Every Claude Code / Cowork message has a cached prefix and a fresh suffix. The cached part is 10× cheaper. If you keep the prefix stable, costs stay flat. If you break the cache, costs explode. Three cache layers, three TTLs:',
+         '每一則 Claude Code / Cowork 訊息都由「已快取的前綴 + 新的後綴」組成。已快取的部分便宜 10 倍。前綴穩定 = 成本平穩。打破 cache = 成本暴增。三層 cache，三組 TTL：'),
+        ('System layer', '系統層'),
+        ('Base instructions, tool definitions, output style. Global. TTL 1h.', '基本指令、工具定義、輸出風格。全域。TTL 1 小時。'),
+        ('Project layer', '專案層'),
+        ('CLAUDE.md, memory files, project rules. Per project. TTL 1h.', 'CLAUDE.md、memory、專案規則。按專案。TTL 1 小時。'),
+        ('Conversation layer', '對話層'),
+        ("Everything you typed + Claude's replies + tool results in this thread. TTL 1h (subscription) or 5min (sub-agents).",
+         '你輸入的所有內容 + Claude 的回覆 + 工具結果。TTL 1 小時（訂閱）或 5 分鐘（子代理）。'),
+        ('The 4 things that <b>silently rebuild your entire cache from scratch</b>', '會<b>悄悄把整個 cache 砍掉重建</b>的 4 件事'),
+        ("every one costs you real cache-write tokens you didn't intend to spend:",
+         '每一件都會花你本來不該花的 cache-write token：'),
+        ('Switching models mid-conversation', '對話中切換模型'),
+        ('Each switch = full re-cache.', '每次切換 = 整個重 cache。'),
+        ('Editing CLAUDE.md mid-session.', '對話中修改 CLAUDE.md。'),
+        ('CLAUDE.md is part of the prefix. Change it and the prefix changes.', 'CLAUDE.md 是前綴的一部分，改它前綴就變。'),
+        ('Idling &gt; 1 hour.', '閒置超過 1 小時。'),
+        ('TTL expires. Next message rebuilds everything.', 'TTL 過期，下次訊息要重建整個 cache。'),
+        ('Running /compact in the middle of a task.', '在任務中途跑 /compact。'),
+        ('Same effect as /clear.', '跟 /clear 同樣後果。'),
+        ('Cache layer model credit:', 'Cache 分層模型出處：'),
+        # Hero impact
+        ('tokens you burned for nothing', '你白白燒掉的 token'),
+        ('cache-write tokens written to disk and never read back before they expired.', 'cache-write token 寫進去就過期，從沒被讀回。'),
+        ('Pure dead spend.', '純死錢。'),
+        ('Money you handed the vendor for zero value.', '給廠商換到零價值。'),
+        ('Actual cost so far (USD)', '目前實際花費 (USD)'),
+        ("What you've paid since", '從以下日期至今你付的'),
+        ("If you'd used the API directly (USD)", '如果你走 API 直接會花 (USD)'),
+        ('No cache discount. This is what API users (you, back in April) actually pay.', '無 cache 折扣。這是 API 用戶（你 4 月那時）實際付的。'),
+        ('× the subscription price.', '倍訂閱價。'),
+        ('Saved by using subscription + cache (USD)', '靠訂閱 + cache 紀律救回 (USD)'),
+        ('Vs. naive API pricing on the same workload. Cache discipline = real money.', '對比同樣 workload 走 API 直接。Cache 紀律 = 真錢。'),
+        # CTA
+        ('⚡ One /clear right now could save approximately', '⚡ 現在按 /clear 大約能省'),
+        ('over the next hour', '（接下來 1 小時內）'),
+        ('Based on your recent 60-minute burn rate ·', '根據你最近 60 分鐘燃燒率 ·'),
+        ('active session(s) carrying stale cache', '個 session 帶著過期 cache'),
+        ('Run /clear in your terminal', '在終端機按 /clear'),
+        # Red flag
+        ('🚨 Top money-burning projects (red flag)', '🚨 燒錢冠軍專案排行（紅旗）'),
+        # Per-message
+        ('💬 What does ONE message actually cost you?', '💬 你的一個訊息實際花多少？'),
+        ('Averaged across', '平均自'),
+        ('assistant messages in your panel since', '個 assistant 訊息，自'),
+        ('📥 Input tokens (new, the command you typed + tool results)', '📥 Input tokens（新的，你打的 + tool 結果）'),
+        ('♻️ Cache read tokens (re-used context, 10× discount)', '♻️ Cache read tokens（重用 context，9 折）'),
+        ("📤 Output tokens (Claude's reply)", '📤 Output tokens（Claude 回你的話）'),
+        ('💾 Cache write tokens (storing new context)', '💾 Cache write tokens（寫進 cache 的新 context）'),
+        ('🗑️ Wasted cache writes (written but never read back)', '🗑️ 浪費的 cache write（寫了沒被讀就過期）'),
+        ('TOTAL per message', '每訊息合計'),
+        ('Typical message (P50)', '典型訊息 (P50)'),
+        ('Heavy message (P95)', '重訊息 (P95)'),
+        ('Most expensive ever', '史上最貴'),
+        ('per message', '每訊息'),
+        ('messages / day (your avg)', '訊息/天（你平均）'),
+        ('per day', '每天'),
+        ('per month (subscription tier)', '每月（訂閱級）'),
+        ('SAME workload on API-direct (no cache)', '同樣 workload 走 API 直接（無 cache）'),
+        # DIY
+        ('📊 Want to see YOUR own numbers?', '📊 想看你自己的數字嗎？'),
+        ('This dashboard reads only local', '本面板只讀本機'),
+        ('files. Nothing leaves your machine. MIT licensed. Two-line install:', '檔案。沒有任何資料離開你電腦。MIT 授權。兩行安裝：'),
+        ('📊 Calculate yours NOW (no install)', '📊 立刻算你自己的（不用安裝）'),
+        ('No install · 100% in-browser · Nothing uploaded', '不用安裝 · 100% 瀏覽器內 · 完全不上傳'),
+        # Misc
+        ('Cache health score:', 'Cache 健康分數：'),
+        ("/ 100 · click to see what's costing you points", '/ 100 · 點開看扣分原因'),
+        ('Active sessions (deep detail)', '進行中對話（詳細）'),
+        ('No active sessions right now.', '目前沒有進行中的對話。'),
+        ('Daily cost · last 30 days · stacked by vendor', '每日花費 · 近 30 天 · 按廠商堆疊'),
+        ('Hourly activity (24h heat)', '每小時活動（24 小時熱度）'),
+        ('Messages by hour of day', '每小時訊息數'),
+        ('Top 20 projects by saving', '前 20 個救最多錢的專案'),
+        ('Tool usage (lifetime)', '工具使用（累計）'),
+        ('Skill usage (lifetime)', '技能使用（累計）'),
+        ('No tool calls', '無工具呼叫'),
+        ('No skills used', '無使用技能'),
+        ('Reasonable vs unreasonable usage · your own baseline ·', '合理 vs 不合理用量 · 你自己的基準線 ·'),
+        ('days observed', '天資料'),
+        ('P50 (typical day)', 'P50（典型日）'),
+        ('P90 (heavy day)', 'P90（重日）'),
+        ('P95 (unusual day)', 'P95（異常日）'),
+        ('Max day (peak)', '單日最高'),
+        ('Days above your P95 threshold:', '超過你 P95 門檻的日子：'),
+        ('typical pro dev burn ≈', '一般專業開發者燒 ≈'),
+        # Vendor cards
+        ('cache saved', 'cache 救回'),
+        ('total spent', '總花費'),
+        ('active now', '進行中'),
+        ('hit rate', '命中率'),
+        ('cache toks', 'cache token'),
+        # Project table cols
+        ('Project</th>', '專案</th>'),
+        ('Sessions</th>', '對話數</th>'),
+        ('Active</th>', '進行中</th>'),
+        ('Cost $</th>', '花費 $</th>'),
+        ('Saved $</th>', '省下 $</th>'),
+        ('Wasted $</th>', '浪費 $</th>'),
+        ('Tool</th>', '工具</th>'),
+        ('Skill</th>', '技能</th>'),
+        ('Calls</th>', '呼叫次數</th>'),
+        # Quota
+        ('plan tier', '方案級別'),
+        ('primary window', '主視窗'),
+        ('primary used', '主視窗已用'),
+        ('secondary window (weekly)', '次視窗（週）'),
+        ('secondary used', '次視窗已用'),
+        ('limit state', '限額狀態'),
+        ('⚠ Vendor changed your quota:', '⚠ 廠商更動了你的限額：'),
+        ('⚠ You hit the rate limit', '⚠ 你撞限額'),
+        ('times.', '次。'),
+        # Footer
+        ('Pricing: Claude', '價格：Claude'),
+        ('Codex (', 'Codex ('),
+        ('Mercury Cache Panel', 'Mercury Cache Panel'),
+    ]
+    for en, zh in swaps:
+        html = html.replace(en, zh)
+    return html
+
+def render_html(data, lang='en'):
+    # Language switcher (top-right floating button)
+    other_url = 'zh.html' if lang == 'en' else 'index.html'
+    other_label = '中文' if lang == 'en' else 'English'
+    lang_switcher = f'<div style="position:fixed;top:14px;right:18px;z-index:1000"><a href="{other_url}" style="background:#1a2538;color:#5599ee;padding:8px 16px;border-radius:6px;font-size:13px;font-weight:600;text-decoration:none;border:1px solid #2c4a7c">🌐 {other_label}</a></div>'
+
     daily = sorted(data["by_day"].items())[-30:]
     max_d = max((v["actual_usd"] for _, v in daily), default=1)
 
@@ -894,6 +1055,8 @@ def render_html(data):
   .b-lbl {{ font-size: 9px; color: #6b7480; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 4px; display: block; }}
 </style></head><body>
 
+{lang_switcher}
+
 <h1>💸 Where your AI tokens actually went</h1>
 <div class="meta">Since {data["first_day"]} · {data["n_sessions"]} sessions · {data["n_active"]} active right now · auto-refresh 60s · <b>all amounts in USD</b></div>
 
@@ -1078,7 +1241,11 @@ def main():
     while True:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] building...")
         data = build_panel_data()
-        OUT_HTML.write_text(render_html(data))
+        en_html = render_html(data, lang='en')
+        OUT_HTML.write_text(en_html)
+        # Also produce ZH version
+        zh_html = _translate_to_zh(render_html(data, lang='zh'))
+        (OUT_HTML.parent / "mercury-cache-panel-zh.html").write_text(zh_html)
         n_cl = data["by_vendor"].get("claude", {}).get("n", 0)
         n_cx = data["by_vendor"].get("codex", {}).get("n", 0)
         ts = sum(v["cost"]["saved_usd"] for v in data["by_vendor"].values())
