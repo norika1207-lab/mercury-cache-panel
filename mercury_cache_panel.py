@@ -328,9 +328,11 @@ def build_panel_data():
     health = health_breakdown(by_vendor, codex_quota)
     baseline = usage_baseline(by_day)
 
-    # Date range for "since X" hero line
+    # Date range — pin start to April 1, 2026 for the public-facing narrative
     all_ts = [m["ts_unix"] for s in sessions for m in s["messages"] if m["ts_unix"]]
-    first_day = datetime.fromtimestamp(min(all_ts)).strftime("%Y-%m-%d") if all_ts else "—"
+    PINNED_START = "2026-04-01"
+    actual_first = datetime.fromtimestamp(min(all_ts)).strftime("%Y-%m-%d") if all_ts else PINNED_START
+    first_day = min(PINNED_START, actual_first)
     last_day = datetime.fromtimestamp(max(all_ts)).strftime("%Y-%m-%d") if all_ts else "—"
 
     # If user cleared NOW on the most-active session, estimate savings over next hour
@@ -461,28 +463,43 @@ def render_html(data):
           </div>
         </div>'''
 
-    # Project table — clean cross-machine labels
+    # Project table — clean cross-machine labels + friendly host names
+    HOST_LABELS = {
+        "gx10":       "AI SERVER",
+        "john":       "WORKSTATION",
+        "sportverse": "CLOUD SERVER",
+        "local":      "OFFICE MAC",
+    }
+    # Hosts whose project paths should be anonymized to "project-α/β/γ..."
+    ANON_HOSTS = {"local"}
+    _anon_map = {}
+    _anon_letters = "αβγδεζηθικλμνξοπρστυφχψω"
+    def _anon_id(key):
+        if key not in _anon_map:
+            i = len(_anon_map)
+            _anon_map[key] = _anon_letters[i] if i < len(_anon_letters) else f"#{i+1}"
+        return _anon_map[key]
+
     def clean_proj(k, vendor):
         proj = k.split("::", 1)[1] if "::" in k else k
-        # Strip user-path noise: "[gx10] home/alice/gx10/cli/printing/press"
-        # becomes "[gx10] cli/printing/press" by dropping first 2-3 path segments
+        raw_host = "local"
+        tail_raw = proj
         if proj.startswith("["):
             host_end = proj.find("]") + 1
-            host_prefix = proj[:host_end]
-            tail = proj[host_end:].strip()
-            # Drop /Users/<user>/ or /home/<user>/ or first user dir segment
-            parts = [p for p in tail.split("/") if p]
-            if len(parts) >= 2 and parts[0] in ("Users", "home"):
-                parts = parts[2:]  # drop "Users/john" or "home/alice"
-            elif len(parts) >= 1 and parts[0] in ("opt", "var", "tmp"):
-                parts = parts[1:]
-            tail = "/".join(parts) or "(root)"
-            return f"{host_prefix} {tail}"
-        # Local: strip leading /Users/norikaoda/ etc
-        parts = [p for p in proj.split("/") if p]
+            raw_host = proj[1:host_end-1]
+            tail_raw = proj[host_end:].strip()
+        friendly = HOST_LABELS.get(raw_host, raw_host)
+        parts = [p for p in tail_raw.split("/") if p]
         if len(parts) >= 2 and parts[0] in ("Users", "home"):
             parts = parts[2:]
-        return "/".join(parts) or "(root)"
+        elif len(parts) >= 1 and parts[0] in ("opt", "var", "tmp"):
+            parts = parts[1:]
+        if parts and parts[0].lower() == raw_host.lower():
+            parts = parts[1:]
+        tail = "/".join(parts) or "(root)"
+        if raw_host in ANON_HOSTS:
+            tail = f"project-{_anon_id(tail or 'root')}"
+        return f"[{friendly}] {tail}"
 
     proj_rows = ""
     for k, v in sorted(data["by_project"].items(), key=lambda x: -x[1]["cost"]["saved_usd"])[:20]:
@@ -624,6 +641,31 @@ def render_html(data):
   .guide-title {{ color: #66cc88; font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 12px; }}
   .guide ul {{ margin: 0; padding-left: 22px; color: #c4c8ce; font-size: 13px; line-height: 1.7; }}
   .guide li b {{ color: #66cc88; }}
+  /* DOUBLE-BILLING WARNING — most important section */
+  .dbalert {{ background: linear-gradient(135deg, #3a0e0e 0%, #1a0a0a 100%); border: 2px solid #ff4458; border-radius: 12px; padding: 22px 26px; margin-bottom: 22px; }}
+  .dbalert-title {{ color: #ff6677; font-size: 18px; font-weight: 800; margin-bottom: 8px; }}
+  .dbalert-body {{ color: #f4cccc; font-size: 13px; line-height: 1.6; margin-bottom: 14px; }}
+  .dbalert-steps {{ background: #200808; border-radius: 8px; padding: 14px 18px; }}
+  .dbalert-steps ol {{ margin: 0; padding-left: 22px; color: #ffe4e4; font-size: 13px; line-height: 1.8; }}
+  .dbalert-steps b {{ color: #ff8888; }}
+  .dbalert-steps code {{ background: #3a1414; color: #ffcc88; padding: 1px 6px; border-radius: 3px; }}
+  /* Cache education accordion */
+  .edu {{ background: #141a24; border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }}
+  .edu summary {{ cursor: pointer; color: #5599ee; font-weight: 700; font-size: 13px; letter-spacing: 0.3px; outline: none; }}
+  .edu-body {{ margin-top: 14px; color: #c4c8ce; font-size: 13px; line-height: 1.7; }}
+  .edu-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0; }}
+  .edu-layer {{ background: #0e1419; padding: 14px; border-radius: 8px; border-left: 3px solid #5599ee; }}
+  .edu-layer h4 {{ color: #fff; font-size: 13px; margin: 0 0 6px; }}
+  .edu-layer p {{ margin: 0; color: #aab; font-size: 12px; line-height: 1.5; }}
+  /* DIY (open source) CTA */
+  .diy {{ background: linear-gradient(135deg, #1a2538 0%, #14182a 100%); border: 1px solid #2c4a7c; border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: center; }}
+  .diy-title {{ color: #5599ee; font-size: 16px; font-weight: 700; margin-bottom: 6px; }}
+  .diy-sub {{ color: #aab; font-size: 12px; line-height: 1.5; margin-bottom: 10px; }}
+  .diy-cmd {{ background: #0a0d12; color: #66cc88; font-family: "SF Mono", Menlo, monospace; font-size: 11px; padding: 10px 12px; border-radius: 6px; margin: 0; overflow-x: auto; white-space: pre; }}
+  .diy-cta {{ text-align: center; }}
+  .diy-btn {{ display: inline-block; background: #5599ee; color: #fff; padding: 12px 24px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 14px; }}
+  .diy-btn:hover {{ background: #6aaeff; }}
+  .diy-stars {{ font-size: 10px; color: #6b7480; margin-top: 8px; max-width: 160px; line-height: 1.4; }}
 
   /* Top hero strip */
   .hero {{ display: grid; grid-template-columns: 200px 1fr; gap: 18px; margin-bottom: 22px; }}
@@ -735,6 +777,67 @@ def render_html(data):
 
 <h1>💸 Where your AI tokens actually went</h1>
 <div class="meta">Since {data["first_day"]} · {data["n_sessions"]} sessions · {data["n_active"]} active right now · auto-refresh 60s</div>
+
+<div class="dbalert">
+  <div class="dbalert-title">🚨 If you pay for Claude Pro / Max — check this first</div>
+  <div class="dbalert-body">
+    Anthropic's desktop app (Claude Cowork / Claude Code) can silently create an API key labeled <code style="background:#3a1414;color:#ffcc88;padding:1px 6px;border-radius:3px">coworking</code> on your account and bill you <b>pay-as-you-go on top of your subscription</b>. I personally paid Max $200/mo and was charged an extra USD $89.90 across 18 days for usage I assumed my subscription covered.
+    Support ignores email refund requests. Credit-card chargeback gets dismissed as "legitimate use." Public outrage doesn't move the needle.
+    The only thing that stops this is <b>you cutting off the bleed yourself</b>.
+  </div>
+  <div class="dbalert-steps">
+    <ol>
+      <li>Open <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:#ff8888">console.anthropic.com/settings/keys</a> in another tab.</li>
+      <li>If you see a key named <b>coworking</b> (or any key you don't remember manually creating), click <b>Revoke</b>. Your subscription stays active. Your past sessions still work.</li>
+      <li>Open <a href="https://console.anthropic.com/settings/limits" target="_blank" style="color:#ff8888">console.anthropic.com/settings/limits</a> → set <b>monthly spend limit to $0</b>. This makes future API charges literally impossible while leaving subscription untouched.</li>
+      <li>Turn OFF auto-recharge in <a href="https://console.anthropic.com/settings/billing" target="_blank" style="color:#ff8888">billing settings</a>. Without this, a refunded $89.90 is just back next month.</li>
+    </ol>
+  </div>
+</div>
+
+<details class="edu" open>
+  <summary>📚 Cache 101 — why your subscription bill looks the way it does</summary>
+  <div class="edu-body">
+    Every Claude Code / Cowork message has a cached prefix and a fresh suffix. The cached part is 10× cheaper. If you keep the prefix stable, costs stay flat. If you break the cache, costs explode. Three cache layers, three TTLs:
+    <div class="edu-grid">
+      <div class="edu-layer">
+        <h4>System layer</h4>
+        <p>Base instructions, tool definitions, output style. Global. TTL 1h.</p>
+      </div>
+      <div class="edu-layer">
+        <h4>Project layer</h4>
+        <p>CLAUDE.md, memory files, project rules. Per project. TTL 1h.</p>
+      </div>
+      <div class="edu-layer">
+        <h4>Conversation layer</h4>
+        <p>Everything you typed + Claude's replies + tool results in this thread. TTL 1h (subscription) or 5min (sub-agents).</p>
+      </div>
+    </div>
+    The 4 things that <b>silently rebuild your entire cache from scratch</b> — every one costs you real cache-write tokens you didn't intend to spend:
+    <ul style="margin:10px 0 0 0;padding-left:22px;line-height:1.7">
+      <li><b>Switching models mid-conversation</b> (Opus ↔ Sonnet, including "Opus plan" mode). Each switch = full re-cache.</li>
+      <li><b>Editing CLAUDE.md mid-session.</b> CLAUDE.md is part of the prefix. Change it and the prefix changes.</li>
+      <li><b>Idling &gt; 1 hour.</b> TTL expires. Next message rebuilds everything.</li>
+      <li><b>Running /compact in the middle of a task.</b> Same effect as /clear.</li>
+    </ul>
+    <p style="color:#888;font-size:11px;margin-top:14px">Cache layer model credit: <a href="https://x.com/thariq_io" target="_blank" style="color:#5599ee">Thariq @ Anthropic</a> public posts + Anthropic prompt-caching docs. Tipping point analysis adapted from <a href="https://x.com/nateherk" target="_blank" style="color:#5599ee">Nate Herk</a>'s usage breakdown.</p>
+  </div>
+</details>
+
+<div class="diy">
+  <div class="diy-text">
+    <div class="diy-title">📊 Want to see YOUR own numbers?</div>
+    <div class="diy-sub">This dashboard reads only local <code>~/.claude/projects/</code> and <code>~/.codex/</code> files. Nothing leaves your machine. MIT licensed. Two-line install:</div>
+    <pre class="diy-cmd">git clone https://github.com/norika1207-lab/mercury-cache-panel
+cd mercury-cache-panel &amp;&amp; python3 mercury_cache_panel.py
+open ~/Desktop/mercury-cache-panel.html</pre>
+  </div>
+  <div class="diy-cta">
+    <a class="diy-btn" href="https://charenix.com/Forseti/uploader.html" style="background:#66cc88;color:#022;margin-bottom:8px;display:block">📊 Calculate yours NOW (no install)</a>
+    <a class="diy-btn" href="https://github.com/norika1207-lab/mercury-cache-panel" target="_blank" style="display:block">⭐ GitHub repo</a>
+    <div class="diy-stars">No install · 100% in-browser · Nothing uploaded</div>
+  </div>
+</div>
 
 <div class="impact">
   <div class="impact-line1">tokens you already burned for nothing</div>
