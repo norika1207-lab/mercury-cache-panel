@@ -895,7 +895,7 @@ def render_html(data):
 </style></head><body>
 
 <h1>💸 Where your AI tokens actually went</h1>
-<div class="meta">Since {data["first_day"]} · {data["n_sessions"]} sessions · {data["n_active"]} active right now · auto-refresh 60s</div>
+<div class="meta">Since {data["first_day"]} · {data["n_sessions"]} sessions · {data["n_active"]} active right now · auto-refresh 60s · <b>all amounts in USD</b></div>
 
 <div class="dbalert">
   <div class="dbalert-title">🚨 If you pay for Claude Pro / Max — check this first</div>
@@ -960,22 +960,22 @@ open ~/Desktop/mercury-cache-panel.html</pre>
 
 <div class="impact">
   <div class="impact-line1">tokens you already burned for nothing</div>
-  <div class="impact-num">${total_wasted:.2f}</div>
+  <div class="impact-num">USD ${total_wasted:.2f}</div>
   <div class="impact-tag">{total_wasted_tok:,} cache-write tokens written to disk and never read back before they expired. Pure dead spend. Money you handed the vendor for zero value.</div>
   <div class="impact-row2">
     <div class="impact-card">
-      <div class="ic-lbl">Actual cost so far</div>
-      <div class="ic-num">${total_actual:,.2f}</div>
+      <div class="ic-lbl">Actual cost so far (USD)</div>
+      <div class="ic-num">USD ${total_actual:,.2f}</div>
       <div class="ic-tag">What you've paid since {data["first_day"]}</div>
     </div>
     <div class="impact-card">
-      <div class="ic-lbl">If you'd used the API directly</div>
-      <div class="ic-num">${total_naive:,.2f}</div>
+      <div class="ic-lbl">If you'd used the API directly (USD)</div>
+      <div class="ic-num">USD ${total_naive:,.2f}</div>
       <div class="ic-tag">No cache discount. This is what API users (you, back in April) actually pay. {api_multiplier:.1f}× the subscription price.</div>
     </div>
     <div class="impact-card win">
-      <div class="ic-lbl">Saved by using subscription + cache</div>
-      <div class="ic-num">${total_saved:,.0f}</div>
+      <div class="ic-lbl">Saved by using subscription + cache (USD)</div>
+      <div class="ic-num">USD ${total_saved:,.0f}</div>
       <div class="ic-tag">Vs. naive API pricing on the same workload. Cache discipline = real money.</div>
     </div>
   </div>
