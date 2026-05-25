@@ -335,6 +335,48 @@ def build_panel_data():
     first_day = min(PINNED_START, actual_first)
     last_day = datetime.fromtimestamp(max(all_ts)).strftime("%Y-%m-%d") if all_ts else "—"
 
+    # Per-message statistics: what does ONE message actually cost?
+    all_msgs = [m for s in sessions for m in s["messages"]]
+    n_msgs = len(all_msgs)
+    per_msg = {"input":0,"output":0,"cache_read":0,"cache_write_1h":0,"cache_write_5m":0,"cost":0,"waste_cost":0}
+    msg_costs = []
+    for s in sessions:
+        p = PRICING.get(s["vendor"], PRICING["claude"])
+        # Per-message waste detection: each cache_write that no following message used
+        msgs = s["messages"]
+        for i, m in enumerate(msgs):
+            c = (m["input"]/1e6*p["input"] + m["output"]/1e6*p["output"]
+                 + m["cache_read"]/1e6*p.get("cache_read",0)
+                 + m["cache_write_1h"]/1e6*p.get("cache_write_1h",0)
+                 + m["cache_write_5m"]/1e6*p.get("cache_write_5m",0))
+            msg_costs.append(c)
+            per_msg["input"] += m["input"]
+            per_msg["output"] += m["output"]
+            per_msg["cache_read"] += m["cache_read"]
+            per_msg["cache_write_1h"] += m["cache_write_1h"]
+            per_msg["cache_write_5m"] += m["cache_write_5m"]
+            per_msg["cost"] += c
+            # Per-message waste estimation
+            if s["vendor"] == "claude":
+                if m["cache_write_1h"] > 0 and not any(n["ts_unix"]-m["ts_unix"]<TTL_1H_SEC and n["cache_read"]>0 for n in msgs[i+1:]):
+                    per_msg["waste_cost"] += m["cache_write_1h"]/1e6*p.get("cache_write_1h",0)
+                if m["cache_write_5m"] > 0 and not any(n["ts_unix"]-m["ts_unix"]<TTL_5M_SEC and n["cache_read"]>0 for n in msgs[i+1:]):
+                    per_msg["waste_cost"] += m["cache_write_5m"]/1e6*p.get("cache_write_5m",0)
+    avg = {k: (v / n_msgs if n_msgs else 0) for k, v in per_msg.items()}
+    msg_costs.sort()
+    p50_msg = msg_costs[len(msg_costs)//2] if msg_costs else 0
+    p95_msg = msg_costs[int(len(msg_costs)*0.95)] if msg_costs else 0
+    max_msg = msg_costs[-1] if msg_costs else 0
+
+    # Today's pace
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+    today_data = by_day.get(today_iso, {"actual_usd":0,"wasted_usd":0,"messages":0})
+    # Rate per day (mean of all days)
+    daily_costs = [v["actual_usd"] for v in by_day.values() if v["actual_usd"] > 0]
+    avg_daily = sum(daily_costs) / len(daily_costs) if daily_costs else 0
+    proj_monthly = avg_daily * 30
+    naive_monthly = proj_monthly * (sum(v["cost"].get("naive_usd",0) for v in by_vendor.values()) / max(sum(v["cost"]["actual_usd"] for v in by_vendor.values()), 0.01))
+
     # If user cleared NOW on the most-active session, estimate savings over next hour
     clear_now_savings = 0
     for s in active_detail:
@@ -355,6 +397,15 @@ def build_panel_data():
         "by_tool": dict(by_tool),
         "by_skill": dict(by_skill),
         "clear_now_savings": clear_now_savings,
+        "per_msg_avg": avg,
+        "n_msgs": n_msgs,
+        "msg_p50_cost": p50_msg,
+        "msg_p95_cost": p95_msg,
+        "msg_max_cost": max_msg,
+        "today_data": today_data,
+        "avg_daily": avg_daily,
+        "proj_monthly": proj_monthly,
+        "naive_monthly": naive_monthly,
         "by_hour": dict(by_hour),
         "codex_quota": codex_quota,
         "active_detail": active_detail,
@@ -612,6 +663,50 @@ def render_html(data):
     if bad_proj_html:
         redflag_html = f'<div class="card" style="border-left: 3px solid #cc5566"><div class="card-title">🚨 Top money-burning projects (red flag)</div><table><tr><th>Project</th><th class="r">Sessions</th><th class="r">Cost $</th><th class="r">Wasted $</th></tr>{bad_proj_html}</table></div>'
 
+    # Per-message breakdown HTML
+    pm = data["per_msg_avg"]
+    n_msgs = data["n_msgs"]
+    p = PRICING["claude"]
+    avg_input_cost = pm["input"]/1e6*p["input"]
+    avg_cr_cost    = pm["cache_read"]/1e6*p["cache_read"]
+    avg_out_cost   = pm["output"]/1e6*p["output"]
+    avg_cw_cost    = pm["cache_write_1h"]/1e6*p["cache_write_1h"] + pm["cache_write_5m"]/1e6*p["cache_write_5m"]
+    avg_waste_cost = pm["waste_cost"]
+    avg_total_cost = pm["cost"]
+    waste_pct = (avg_waste_cost / max(avg_total_cost, 0.0001)) * 100
+
+    permsg_html = f'''
+    <div class="permsg">
+      <div class="permsg-title">💬 What does ONE message actually cost you?</div>
+      <div class="permsg-sub">Averaged across {n_msgs:,} assistant messages in your panel since {data["first_day"]}.</div>
+      <table class="permsg-table">
+        <tr><td>📥 Input tokens (new, the command you typed + tool results)</td><td>{int(pm["input"]):,}</td><td>${avg_input_cost:.4f}</td></tr>
+        <tr><td>♻️ Cache read tokens (re-used context, 10× discount)</td><td>{int(pm["cache_read"]):,}</td><td>${avg_cr_cost:.4f}</td></tr>
+        <tr><td>📤 Output tokens (Claude's reply)</td><td>{int(pm["output"]):,}</td><td>${avg_out_cost:.4f}</td></tr>
+        <tr><td>💾 Cache write tokens (storing new context)</td><td>{int(pm["cache_write_1h"]+pm["cache_write_5m"]):,}</td><td>${avg_cw_cost:.4f}</td></tr>
+        <tr class="waste"><td>🗑️ Wasted cache writes (written but never read back)</td><td>{int(pm["waste_cost"]/p["cache_write_1h"]*1e6):,}</td><td>${avg_waste_cost:.4f} ({waste_pct:.1f}%)</td></tr>
+        <tr class="total"><td>TOTAL per message</td><td>—</td><td>${avg_total_cost:.4f}</td></tr>
+      </table>
+      <div class="permsg-dist">
+        <div><span class="d-num">${data["msg_p50_cost"]:.4f}</span><span class="d-lbl">Typical message (P50)</span></div>
+        <div><span class="d-num">${data["msg_p95_cost"]:.4f}</span><span class="d-lbl">Heavy message (P95)</span></div>
+        <div><span class="d-num">${data["msg_max_cost"]:.4f}</span><span class="d-lbl">Most expensive ever</span></div>
+      </div>
+    </div>
+
+    <div class="proj">
+      <div class="proj-row">
+        <div class="proj-stat"><span class="pn">${avg_total_cost:.4f}</span><span class="pl">per message</span></div>
+        <span class="proj-arrow">×</span>
+        <div class="proj-stat"><span class="pn">{int(n_msgs / max(len(data["by_day"]), 1)):,}</span><span class="pl">messages / day (your avg)</span></div>
+        <span class="proj-arrow">=</span>
+        <div class="proj-stat"><span class="pn">${data["avg_daily"]:.2f}</span><span class="pl">per day</span></div>
+        <span class="proj-arrow">×30</span>
+        <div class="proj-stat"><span class="pn">${data["proj_monthly"]:.2f}</span><span class="pl">per month (subscription tier)</span></div>
+        <div class="proj-final proj-stat"><span class="pn">${data["naive_monthly"]:,.0f}</span><span class="pl" style="color:#fdd">SAME workload on API-direct (no cache)</span></div>
+      </div>
+    </div>'''
+
     return f'''<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Mercury Cache Panel — your AI token reality check</title>
 <meta http-equiv="refresh" content="60">
@@ -657,6 +752,30 @@ def render_html(data):
   .edu-layer {{ background: #0e1419; padding: 14px; border-radius: 8px; border-left: 3px solid #5599ee; }}
   .edu-layer h4 {{ color: #fff; font-size: 13px; margin: 0 0 6px; }}
   .edu-layer p {{ margin: 0; color: #aab; font-size: 12px; line-height: 1.5; }}
+  /* Per-message cost breakdown */
+  .permsg {{ background: #141a24; border-radius: 12px; padding: 24px 26px; margin-bottom: 22px; border-top: 3px solid #ffcc55; }}
+  .permsg-title {{ color: #ffcc55; font-size: 16px; font-weight: 700; margin-bottom: 6px; }}
+  .permsg-sub {{ color: #888; font-size: 12px; margin-bottom: 20px; }}
+  .permsg-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  .permsg-table td {{ padding: 9px 12px; border-bottom: 1px solid #1f2632; }}
+  .permsg-table td:first-child {{ color: #aab; }}
+  .permsg-table td:nth-child(2) {{ text-align: right; font-variant-numeric: tabular-nums; color: #fff; font-weight: 600; }}
+  .permsg-table td:nth-child(3) {{ text-align: right; font-variant-numeric: tabular-nums; color: #ffcc55; font-weight: 700; padding-left: 18px; }}
+  .permsg-table tr.total td {{ border-top: 2px solid #2c3a4c; border-bottom: none; padding-top: 14px; color: #fff; font-size: 15px; font-weight: 700; }}
+  .permsg-table tr.waste td:nth-child(3) {{ color: #cc5566; }}
+  .permsg-dist {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }}
+  .permsg-dist > div {{ background: #0e1419; padding: 14px; border-radius: 8px; text-align: center; }}
+  .permsg-dist .d-num {{ font-size: 20px; font-weight: 700; color: #ffcc55; display: block; }}
+  .permsg-dist .d-lbl {{ font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 4px; display: block; }}
+  /* Projection bar */
+  .proj {{ background: linear-gradient(135deg, #1a2014 0%, #14180e 100%); border-left: 4px solid #ffcc55; border-radius: 10px; padding: 18px 22px; margin-bottom: 22px; }}
+  .proj-row {{ display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }}
+  .proj-stat {{ display: flex; flex-direction: column; }}
+  .proj-stat .pn {{ font-size: 24px; font-weight: 800; color: #ffcc55; }}
+  .proj-stat .pl {{ font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.8px; }}
+  .proj-arrow {{ font-size: 22px; color: #555; }}
+  .proj-final {{ background: #cc5566; color: #fff; padding: 12px 18px; border-radius: 6px; margin-left: auto; }}
+  .proj-final .pn {{ color: #fff !important; }}
   /* DIY (open source) CTA */
   .diy {{ background: linear-gradient(135deg, #1a2538 0%, #14182a 100%); border: 1px solid #2c4a7c; border-radius: 12px; padding: 20px 24px; margin-bottom: 22px; display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: center; }}
   .diy-title {{ color: #5599ee; font-size: 16px; font-weight: 700; margin-bottom: 6px; }}
@@ -863,6 +982,8 @@ open ~/Desktop/mercury-cache-panel.html</pre>
 </div>
 
 {cta_html}
+
+{permsg_html}
 
 <div class="guide">
   <div class="guide-title">💡 How to stop bleeding money (this week)</div>
